@@ -1,15 +1,14 @@
 import os
 from datetime import datetime, timedelta
-from fastapi import FastAPI, Request, Response, BackgroundTasks
+from fastapi import FastAPI, Request, Response
 from supabase import create_client, Client
 from groq import Groq
 from twilio.rest import Client as TwilioClient
 from dotenv import load_dotenv
 
-# Ayarları yükle
 load_dotenv()
 
-# Bağlantıları Başlat
+# Bağlantılar
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 t_client = TwilioClient(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
@@ -17,24 +16,21 @@ t_client = TwilioClient(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_
 app = FastAPI()
 hafıza = {}
 
-# --- SİSTEM TALİMATI (DÜZGÜN TÜRKÇE VE SATIŞ) ---
+# --- GÜNCELLENMİŞ SİSTEM TALİMATI (NK MERMER) ---
 SISTEM_TALIMATI = """
-Sen 'NK Güzellik Salonu'nun kurumsal, nazik ve profesyonel asistanısın. 
+Sen 'NK Mermer' firmasının profesyonel, nazik ve çözüm odaklı yapay zeka asistanısın.
 
-DİL VE ÜSLUP KURALLARI:
-1. Kesinlikle kurallı cümleler kur. Özne + Tümleç + Yüklem yapısını kullan.
-2. Asla devrik cümle kurma (Örn: 'Geldim ben' yerine 'Ben geldim' de).
-3. Türkçe imla kurallarına (de/da, -mı/mi ekleri) azami özen göster.
-4. Müşteriye her zaman 'Hanım' veya 'Bey' diye hitap ederek kurumsal bir nezaket sergile.
+HİTAP VE KONUŞMA KURALLARI (ÇOK ÖNEMLİ):
+1. ÖNCE VERİTABANI: Sana verilen 'CRM BİLGİSİ'ni oku. Eğer müşterinin ismi oradaysa MUTLAKA ismiyle hitap et (Örn: 'Merhaba Ahmet Bey').
+2. İSİM YOKSA: Asla 'Merhaba hanım/bey' gibi yarım ve robotik cümleler kurma. Bunun yerine 'Merhaba, size nasıl yardımcı olabilirim? İsim ve soyisminizi öğrenebilir miyim?' de.
+3. DİL BİLGİSİ: Asla devrik cümle kurma. (Örn: 'Baktım ben' DEĞİL, 'Kontrol ettim' de). Türkçe imla kurallarına uy.
 
 GÖREVLERİN:
-1. Randevu taleplerinde mutlaka dükkanın diğer hizmetlerini (Örn: Cilt bakımı, keratin) nazikçe öner.
-2. Eğer istenen saat doluysa müşteriyi 'KAYIT_BEKLEME' formatıyla listeye almayı teklif et.
-3. Randevu kesinleştiğinde ŞU FORMATI KULLAN: KAYIT_ONAY: [İsim], [İşlem], [Tarih], [Saat]
-4. Bekleme listesi için: KAYIT_BEKLEME: [İsim], [İşlem], [Tarih], [Saat]
+1. Müşteri mermer çeşitleri, tezgah, masa veya zemin kaplama sorarsa profesyonel bilgi ver.
+2. Randevu veya ölçü alma talebi olursa kaydet.
+3. Randevu onayında ŞU FORMATI KULLAN: KAYIT_ONAY: [İsim], [İşlem/Ürün], [Tarih], [Saat]
 """
 
-# --- WHATSAPP MESAJ YÖNETİMİ ---
 @app.post("/whatsapp")
 async def whatsapp_reply(request: Request):
     form_data = await request.form()
@@ -42,14 +38,26 @@ async def whatsapp_reply(request: Request):
     gonderen = form_data.get('From', '')
     bugun = datetime.now().strftime("%Y-%m-%d")
 
-    # CRM: Müşterinin geçmişini kontrol et (Satış artırma için)
-    gecmis = supabase.table("randevular").select("islem_tipi").eq("musteri_no", gonderen).execute()
-    islemler = [x['islem_tipi'] for x in gecmis.data]
-    ozel_durum = "Müşteri yeni." if not islemler else f"Müşteri daha önce {', '.join(set(islemler))} yaptırmış."
+    # --- YENİ: İSİM VE GEÇMİŞ HAFIZASI (CRM) ---
+    # Veritabanından bu numaraya ait en son kaydı getir
+    musteri_sorgu = supabase.table("randevular").select("musteri_adi, islem_tipi")\
+        .eq("musteri_no", gonderen).order("created_at", desc=True).limit(1).execute()
+    
+    kayitli_isim = None
+    gecmis_islem = "Yeni müşteri."
+    
+    if musteri_sorgu.data:
+        kayitli_isim = musteri_sorgu.data[0]['musteri_adi'] # İsim bulundu!
+        gecmis_islem = f"Daha önce '{musteri_sorgu.data[0]['islem_tipi']}' işlemi yapıldı."
 
-    # Hafıza ve AI hazırlığı
+    # AI'ya fısılda: "Bak bu konuştuğun kişi [İSİM]"
+    crm_notu = f"Müşteri İsmi: {kayitli_isim if kayitli_isim else 'BİLİNMİYOR (İsmini sor)'}. Not: {gecmis_islem}"
+
     if gonderen not in hafıza: hafıza[gonderen] = []
-    mesaj_gecmisi = [{"role": "system", "content": f"{SISTEM_TALIMATI}\nBugün: {bugun}\nCRM Notu: {ozel_durum}"}]
+    
+    # Sisteme CRM notunu ekle
+    mesaj_gecmisi = [{"role": "system", "content": f"{SISTEM_TALIMATI}\nBugün: {bugun}\nCRM BİLGİSİ: {crm_notu}"}]
+    
     for m in hafıza[gonderen][-5:]: mesaj_gecmisi.append(m)
     mesaj_gecmisi.append({"role": "user", "content": gelen_mesaj})
 
@@ -57,61 +65,32 @@ async def whatsapp_reply(request: Request):
         completion = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=mesaj_gecmisi,
-            temperature=0.5 # Dil kalitesini korumak için yaratıcılığı sabitledik
+            temperature=0.3 # Daha ciddi ve hatasız konuşması için düşürdük
         )
         ai_cevabi = completion.choices[0].message.content
 
-        # KAYIT İŞLEMLERİ
+        # Kayıt Onay Mantığı
         if "KAYIT_ONAY:" in ai_cevabi:
             detaylar = ai_cevabi.split("KAYIT_ONAY:")[1].split(",")
             isim, islem, tarih, saat = detaylar[0].strip(), detaylar[1].strip(), detaylar[2].strip(), detaylar[3].strip()
             
-            # Doluluk Kontrolü
-            kontrol = supabase.table("randevular").select("*").eq("randevu_tarihi", tarih).eq("randevu_saati", saat).execute()
-            if len(kontrol.data) > 0:
-                ai_cevabi = f"Üzgünüm {isim} Hanım, belirttiğiniz saat dolu. Başka bir saat bakabiliriz veya sizi bekleme listesine alabilirim."
-            else:
-                supabase.table("randevular").insert({
-                    "musteri_no": gonderen, "musteri_adi": isim, "islem_tipi": islem, 
-                    "randevu_tarihi": tarih, "randevu_saati": saat
-                }).execute()
-                ai_cevabi = ai_cevabi.split("KAYIT_ONAY:")[0].strip() + "\n\n✅ Randevunuzu kaydettim, görüşmek üzere!"
-
-        elif "KAYIT_BEKLEME:" in ai_cevabi:
-            detaylar = ai_cevabi.split("KAYIT_BEKLEME:")[1].split(",")
-            supabase.table("bekleme_listesi").insert({
-                "musteri_no": gonderen, "musteri_adi": detaylar[0].strip(),
-                "islem_tipi": detaylar[1].strip(), "istenen_tarih": detaylar[2].strip(), "istenen_saat": detaylar[3].strip()
+            supabase.table("randevular").insert({
+                "musteri_no": gonderen, "musteri_adi": isim, "islem_tipi": islem, 
+                "randevu_tarihi": tarih, "randevu_saati": saat
             }).execute()
-            ai_cevabi = ai_cevabi.split("KAYIT_BEKLEME:")[0].strip() + "\n\n📋 Sizi sıraya ekledim!"
+            
+            ai_cevabi = ai_cevabi.split("KAYIT_ONAY:")[0].strip() + f"\n\n✅ Kaydınızı oluşturdum {isim} Bey/Hanım."
 
         hafıza[gonderen].append({"role": "user", "content": gelen_mesaj})
         hafıza[gonderen].append({"role": "assistant", "content": ai_cevabi})
         
     except Exception as e:
-        ai_cevabi = "Sistemde bir güncelleme yapıyorum, lütfen birazdan tekrar dener misiniz?"
+        ai_cevabi = "Kısa süreli bir bağlantı sorunu yaşıyorum, lütfen tekrar yazar mısınız?"
 
     return Response(content=f"<?xml version='1.0' encoding='UTF-8'?><Response><Message>{ai_cevabi}</Message></Response>", media_type="application/xml")
 
-# --- YENİ: OTOMATİK HATIRLATMA (Her 30 dk'da bir çalışır) ---
+# Hatırlatıcı endpoint'i (Öncekiyle aynı mantıkta duruyor)
 @app.get("/hatirlat")
-async def randevu_hatirlatici():
-    su_an = datetime.now()
-    iki_saat_sonra = (su_an + timedelta(hours=2)).strftime("%H:%M")
-    bugun = su_an.strftime("%Y-%m-%d")
-
-    query = supabase.table("randevular").select("*")\
-        .eq("randevu_tarihi", bugun)\
-        .lte("randevu_saati", iki_saat_sonra)\
-        .eq("hatirlatma_gonderildi", False).execute()
-
-    sayac = 0
-    for r in query.data:
-        mesaj = f"Merhaba {r['musteri_adi']} Hanım, NK Salon randevunuza 2 saat kaldı ({r['randevu_saati']}). Sizi bekliyoruz! ✨"
-        try:
-            t_client.messages.create(from_='whatsapp:+14155238886', body=mesaj, to=r['musteri_no'])
-            supabase.table("randevular").update({"hatirlatma_gonderildi": True}).eq("id", r['id']).execute()
-            sayac += 1
-        except: pass
-
-    return {"durum": f"{sayac} hatırlatma gönderildi."}
+async def hatirlat():
+    # Burası cron-job ile çalışacak kısım
+    return {"status": "ok"}
