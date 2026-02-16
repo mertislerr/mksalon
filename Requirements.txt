@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-multipart
+supabase
+groq
+twilio
+python-dotenv
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
